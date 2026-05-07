@@ -1,0 +1,16 @@
+# Token caches (sensitive - never commit)
+.token_cache*
+*.bin
+
+# Local chat group configs (will move to Supabase)
+chat_groups*.json
+profiles.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Streamlit
+.streamlit/secrets.toml
