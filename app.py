@@ -310,6 +310,9 @@ chat_lookup = {c["id"]: chat_label(c) for c in chats}
 # Show active profile in sidebar
 with st.sidebar:
     st.markdown(f"**Signed in as:** {profile}")
+    st.caption(f"Groups key: `groups_{profile}`")
+    raw = sb_get(f"groups_{profile}")
+    st.caption(f"Subgroups found: {list(raw['subgroups'].keys()) if raw else 'None'}")
     if st.button("Switch User"):
         st.session_state.clear()
         st.rerun()
