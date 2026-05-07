@@ -3,12 +3,10 @@ import msal
 import requests
 from requests.exceptions import Timeout, ConnectionError as ReqConnError
 import json
-import time
 import base64
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-REQUEST_TIMEOUT = 30  # seconds per Graph API call
+from supabase import create_client
 
 CLIENT_ID = "95aa84e5-44b3-4233-94f6-25ca740aff4d"
 TENANT_ID = "4a4f2e28-2f12-4cdb-b5eb-9860e3af1045"
@@ -18,44 +16,67 @@ SCOPES = [
     "https://graph.microsoft.com/User.Read",
 ]
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+REQUEST_TIMEOUT = 30  # seconds per Graph API call
 
-APP_DIR = Path(__file__).parent
-PROFILES_FILE = APP_DIR / "profiles.json"
+
+# ── Supabase ──────────────────────────────────────────────────────────────────
+
+@st.cache_resource
+def get_supabase():
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+
+
+def sb_get(key, default=None):
+    try:
+        res = get_supabase().table("app_data").select("value").eq("key", key).execute()
+        if res.data:
+            return json.loads(res.data[0]["value"])
+    except Exception:
+        pass
+    return default
+
+
+def sb_set(key, value):
+    try:
+        get_supabase().table("app_data").upsert({"key": key, "value": json.dumps(value)}).execute()
+    except Exception:
+        pass
+
+
+def sb_delete(key):
+    try:
+        get_supabase().table("app_data").delete().eq("key", key).execute()
+    except Exception:
+        pass
 
 
 # ── Profile helpers ───────────────────────────────────────────────────────────
 
 def load_profiles():
-    if PROFILES_FILE.exists():
-        return json.loads(PROFILES_FILE.read_text())
-    return []
+    return sb_get("profiles", [])
 
 
 def save_profiles(profiles):
-    PROFILES_FILE.write_text(json.dumps(profiles, indent=2))
-
-
-def token_cache_path(profile):
-    return APP_DIR / f".token_cache_{profile}.bin"
-
-
-def groups_path(profile):
-    return APP_DIR / f"chat_groups_{profile}.json"
+    sb_set("profiles", profiles)
 
 
 # ── Token cache ───────────────────────────────────────────────────────────────
 
 def load_cache(profile):
     cache = msal.SerializableTokenCache()
-    path = token_cache_path(profile)
-    if path.exists():
-        cache.deserialize(path.read_text())
+    data = sb_get(f"token_{profile}")
+    if data:
+        cache.deserialize(json.dumps(data))
     return cache
 
 
 def save_cache(cache, profile):
     if cache.has_state_changed:
-        token_cache_path(profile).write_text(cache.serialize())
+        sb_set(f"token_{profile}", json.loads(cache.serialize()))
+
+
+def delete_cache(profile):
+    sb_delete(f"token_{profile}")
 
 
 def build_app(cache=None):
@@ -77,7 +98,6 @@ def get_cached_token(profile):
 
 
 def refresh_token(profile):
-    """Force a fresh token — called automatically when a 401 is detected."""
     token = get_cached_token(profile)
     if token:
         st.session_state.token = token
@@ -107,18 +127,10 @@ def headers(token):
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
-def fetch_chats(token, retries=3, backoff=2):
+def fetch_chats(token):
     chats, url = [], f"{GRAPH_BASE}/me/chats?$top=50"
     while url:
-        for attempt in range(retries):
-            try:
-                resp = requests.get(url, headers=headers(token), timeout=REQUEST_TIMEOUT)
-                break
-            except (Timeout, ReqConnError) as e:
-                if attempt < retries - 1:
-                    time.sleep(backoff * (attempt + 1))
-                else:
-                    raise e
+        resp = requests.get(url, headers=headers(token), timeout=REQUEST_TIMEOUT)
         if resp.status_code != 200:
             break
         data = resp.json()
@@ -155,37 +167,30 @@ def send_message(token, chat_id, message, images=None):
     else:
         body = {"body": {"contentType": "html", "content": msg_html}}
 
-    for attempt in range(3):
-        try:
-            resp = requests.post(url, headers=headers(token), json=body, timeout=REQUEST_TIMEOUT)
-        except Timeout:
-            return False, "Request timed out"
-        except ReqConnError:
-            return False, "Connection error"
-        if resp.status_code == 201:
-            return True, None
-        if resp.status_code == 429:
-            time.sleep(3)  # wait and retry on rate limit
-            continue
-        try:
-            err = resp.json().get("error", {}).get("message", resp.text)
-        except Exception:
-            err = resp.text
-        return False, f"[{resp.status_code}] {err}"
-    return False, "[429] Rate limit — retried 3 times, still throttled"
+    try:
+        resp = requests.post(url, headers=headers(token), json=body, timeout=REQUEST_TIMEOUT)
+    except Timeout:
+        return False, "Request timed out"
+    except ReqConnError:
+        return False, "Connection error"
+
+    if resp.status_code == 201:
+        return True, None
+    try:
+        err = resp.json().get("error", {}).get("message", resp.text)
+    except Exception:
+        err = resp.text
+    return False, f"[{resp.status_code}] {err}"
 
 
-# ── Groups file ───────────────────────────────────────────────────────────────
+# ── Groups ────────────────────────────────────────────────────────────────────
 
 def load_groups(profile):
-    path = groups_path(profile)
-    if path.exists():
-        return json.loads(path.read_text())
-    return {"subgroups": {}, "hidden": []}
+    return sb_get(f"groups_{profile}", {"subgroups": {}, "hidden": []})
 
 
 def save_groups(groups, profile):
-    groups_path(profile).write_text(json.dumps(groups, indent=2))
+    sb_set(f"groups_{profile}", groups)
 
 
 # ── Display name for a chat ───────────────────────────────────────────────────
@@ -259,8 +264,6 @@ if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 if "message_key" not in st.session_state:
     st.session_state.message_key = 0
-if "sending" not in st.session_state:
-    st.session_state.sending = False
 
 # ── Sign-in screen ────────────────────────────────────────────────────────────
 
@@ -344,10 +347,11 @@ with tab_broadcast:
 
     with st.expander(f"Refine recipients ({len(target_ids)} selected)", expanded=False):
         st.caption("Uncheck any chats to skip them for this send only — does not modify the saved group.")
+        valid_ids = [cid for cid in target_ids if cid in chat_lookup]
         target_ids = st.multiselect(
             "Recipients",
-            options=target_ids,
-            default=target_ids,
+            options=valid_ids,
+            default=valid_ids,
             format_func=lambda x: chat_lookup.get(x, x),
             label_visibility="collapsed",
             key=f"refine_{st.session_state.message_key}",
@@ -356,19 +360,14 @@ with tab_broadcast:
     st.caption(f"{len(target_ids)} chat(s) selected")
 
     has_content = message.strip() or uploaded_files
-    send_clicked = st.button("Send Message", type="primary", disabled=not has_content or st.session_state.sending)
+    send_clicked = st.button("Send Message", type="primary", disabled=not has_content)
 
     if send_clicked:
         if not target_ids:
             st.warning("No chats in the selected group.")
         else:
-            # Deduplicate chat IDs to prevent sending twice to the same chat
-            target_ids = list(dict.fromkeys(target_ids))
-
-            st.session_state.sending = True
             images = [(f.read(), f.type) for f in uploaded_files] if uploaded_files else None
 
-            # Always refresh token before sending to avoid mid-session expiry
             fresh_token = refresh_token(profile) or token
 
             bar = st.progress(0, text="Sending...")
@@ -376,24 +375,23 @@ with tab_broadcast:
             total = len(target_ids)
             errors = []
 
-            # Send sequentially with a small delay — prevents rate limit silent failures
-            for cid in target_ids:
-                try:
-                    ok, err = send_message(fresh_token, cid, message, images)
-                except Exception as e:
-                    ok, err = False, str(e)
-                done += 1
-                if ok:
-                    success += 1
-                else:
-                    failed += 1
-                    chat_name = chat_lookup.get(cid, cid)
-                    errors.append(f"**{chat_name}**: {err}")
-                bar.progress(done / total, text=f"Sending... {done}/{total}")
-                time.sleep(0.6)  # stay well under Microsoft's 10/10s rate limit
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = {
+                    executor.submit(send_message, fresh_token, cid, message, images): cid
+                    for cid in target_ids
+                }
+                for future in as_completed(futures):
+                    done += 1
+                    ok, err = future.result()
+                    if ok:
+                        success += 1
+                    else:
+                        failed += 1
+                        chat_name = chat_lookup.get(futures[future], futures[future])
+                        errors.append(f"**{chat_name}**: {err}")
+                    bar.progress(done / total, text=f"Sending... {done}/{total}")
 
             bar.empty()
-            st.session_state.sending = False
             if failed == 0:
                 st.success(f"Sent to all {success} chats successfully.")
                 st.session_state.uploader_key += 1
@@ -484,6 +482,6 @@ with tab_settings:
     st.divider()
 
     if st.button("Sign out", type="secondary"):
-        token_cache_path(profile).unlink(missing_ok=True)
+        delete_cache(profile)
         st.session_state.clear()
         st.rerun()
