@@ -31,16 +31,16 @@ def sb_get(key, default=None):
         res = get_supabase().table("app_data").select("value").eq("key", key).execute()
         if res.data:
             return json.loads(res.data[0]["value"])
-    except Exception:
-        pass
+    except Exception as e:
+        st.error(f"Supabase read error ({key}): {e}")
     return default
 
 
 def sb_set(key, value):
     try:
         get_supabase().table("app_data").upsert({"key": key, "value": json.dumps(value)}).execute()
-    except Exception:
-        pass
+    except Exception as e:
+        st.error(f"Supabase write error ({key}): {e}")
 
 
 def sb_delete(key):
