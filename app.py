@@ -103,10 +103,8 @@ def get_cached_token(profile):
     cache = load_cache(profile)
     app = build_app(cache)
     accounts = app.get_accounts()
-    st.sidebar.caption(f"DEBUG: cache loaded={bool(cache.serialize() != '{}')}, accounts={len(accounts)}")
     if accounts:
         result = app.acquire_token_silent(SCOPES, account=accounts[0])
-        st.sidebar.caption(f"DEBUG: silent result keys={list(result.keys()) if result else 'None'}")
         if result and "access_token" in result:
             save_cache(cache, profile)
             return result["access_token"]
@@ -183,20 +181,29 @@ def send_message(token, chat_id, message, images=None):
     else:
         body = {"body": {"contentType": "html", "content": msg_html}}
 
-    try:
-        resp = requests.post(url, headers=headers(token), json=body, timeout=REQUEST_TIMEOUT)
-    except Timeout:
-        return False, "Request timed out"
-    except ReqConnError:
-        return False, "Connection error"
+    for attempt in range(4):
+        try:
+            resp = requests.post(url, headers=headers(token), json=body, timeout=REQUEST_TIMEOUT)
+        except Timeout:
+            return False, "Request timed out"
+        except ReqConnError:
+            return False, "Connection error"
 
-    if resp.status_code == 201:
-        return True, None
-    try:
-        err = resp.json().get("error", {}).get("message", resp.text)
-    except Exception:
-        err = resp.text
-    return False, f"[{resp.status_code}] {err}"
+        if resp.status_code == 201:
+            return True, None
+
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", 10))
+            time.sleep(retry_after)
+            continue
+
+        try:
+            err = resp.json().get("error", {}).get("message", resp.text)
+        except Exception:
+            err = resp.text
+        return False, f"[{resp.status_code}] {err}"
+
+    return False, "Rate limited — max retries exceeded"
 
 
 # ── Groups ────────────────────────────────────────────────────────────────────
@@ -394,7 +401,7 @@ with tab_broadcast:
             total = len(target_ids)
             errors = []
 
-            with ThreadPoolExecutor(max_workers=8) as executor:
+            with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {
                     executor.submit(send_message, fresh_token, cid, message, images): cid
                     for cid in target_ids
