@@ -24,7 +24,15 @@ const SESSIONS_DIR = path.join(__dirname, "wa-session");
 // Silent logger
 const logger = pino({ level: "silent" });
 
-// ── Sessions map: sessionId -> { sock, isReady, qrCodeData, chatCache } ───────
+// ── Prevent a single bad connection from crashing the whole process ───────────
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception (process kept alive):", err.message);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection (process kept alive):", reason?.message || reason);
+});
+
+// ── Sessions map: sessionId -> { sock, isReady, qrCodeData, chatCache, _connecting } ──
 const sessions = new Map();
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
@@ -38,24 +46,29 @@ app.use((req, res, next) => {
 // ── Get session ID from request ───────────────────────────────────────────────
 function sessionId(req) {
   return (req.headers["x-session-id"] || req.query.session || "default")
-    .replace(/[^a-zA-Z0-9_\- ]/g, "_"); // sanitize for filesystem
+    .replace(/[^a-zA-Z0-9_\- ]/g, "_");
 }
 
 // ── Connect a session ─────────────────────────────────────────────────────────
 async function connectSession(sid) {
-  // If already connecting/connected, skip
-  if (sessions.has(sid) && sessions.get(sid)._connecting) return;
+  const existing = sessions.get(sid);
+
+  // Already connecting — don't create a second socket
+  if (existing?._connecting) return;
 
   const SESSION_PATH = path.join(SESSIONS_DIR, sid);
   if (!fs.existsSync(SESSION_PATH)) fs.mkdirSync(SESSION_PATH, { recursive: true });
 
-  // Init or reuse session state
-  if (!sessions.has(sid)) {
-    sessions.set(sid, { sock: null, isReady: false, qrCodeData: null, chatCache: [], _connecting: true });
-  } else {
-    sessions.get(sid)._connecting = true;
+  // Reuse or create the session state object
+  const session = existing || { sock: null, isReady: false, qrCodeData: null, chatCache: [] };
+  session._connecting = true;
+  sessions.set(sid, session);
+
+  // Cleanly close any previous socket so it stops firing events
+  if (session.sock) {
+    try { session.sock.end(undefined, true); } catch (_) {}
+    session.sock = null;
   }
-  const session = sessions.get(sid);
 
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
   const { version } = await fetchLatestBaileysVersion();
@@ -72,12 +85,16 @@ async function connectSession(sid) {
     generateHighQualityLinkPreview: false,
   });
 
+  // Register this as the active socket BEFORE setting _connecting = false
   session.sock = sock;
   session._connecting = false;
 
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", async (update) => {
+    // Ignore events from stale sockets — only the current one acts
+    if (session.sock !== sock) return;
+
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -103,23 +120,27 @@ async function connectSession(sid) {
     if (connection === "close") {
       session.isReady = false;
       const code = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = code !== DisconnectReason.loggedOut;
-      console.log(`[${sid}] Connection closed. Reconnect:`, shouldReconnect, "Code:", code);
-      if (shouldReconnect) {
-        setTimeout(() => connectSession(sid), 5000);
-      } else {
-        // Logged out — clear session files
+      const loggedOut = code === DisconnectReason.loggedOut;
+      console.log(`[${sid}] Connection closed. Code: ${code}. Reconnect: ${!loggedOut}`);
+
+      if (loggedOut) {
+        // Logged out — wipe session files and start fresh (new QR)
         fs.rmSync(SESSION_PATH, { recursive: true, force: true });
         session.qrCodeData = null;
         session.isReady = false;
         session.chatCache = [];
-        setTimeout(() => connectSession(sid), 2000);
+        session.sock = null;
+        setTimeout(() => connectSession(sid), 3000);
+      } else {
+        // Transient disconnect — reconnect after a delay
+        setTimeout(() => connectSession(sid), 5000);
       }
     }
   });
 
-  // Cache DM chats
+  // Cache DM chats as they arrive
   sock.ev.on("chats.set", ({ chats }) => {
+    if (session.sock !== sock) return;
     const newChats = chats
       .filter((c) => c.name)
       .map((c) => ({
@@ -147,7 +168,6 @@ if (fs.existsSync(SESSIONS_DIR)) {
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-// Ensure a session exists (creates it if not), returns its state
 app.get("/status", async (req, res) => {
   const sid = sessionId(req);
   if (!sessions.has(sid)) {
@@ -155,7 +175,7 @@ app.get("/status", async (req, res) => {
     return res.json({ ready: false, has_qr: false, initializing: true, error: null });
   }
   const s = sessions.get(sid);
-  res.json({ ready: s.isReady, has_qr: !!s.qrCodeData, error: null });
+  res.json({ ready: s.isReady, has_qr: !!s.qrCodeData, initializing: !!s._connecting, error: null });
 });
 
 app.get("/qr", (req, res) => {
@@ -232,14 +252,12 @@ app.post("/logout", async (req, res) => {
   const sid = sessionId(req);
   const s = sessions.get(sid);
   if (!s) return res.json({ ok: true });
-  try {
-    await s.sock.logout();
-  } catch (_) {}
+  try { await s.sock?.logout(); } catch (_) {}
   const SESSION_PATH = path.join(SESSIONS_DIR, sid);
   fs.rmSync(SESSION_PATH, { recursive: true, force: true });
   sessions.delete(sid);
   res.json({ ok: true });
-  // Recreate fresh session (will generate new QR)
+  // Recreate fresh session so QR appears immediately
   setTimeout(() => connectSession(sid), 2000);
 });
 
