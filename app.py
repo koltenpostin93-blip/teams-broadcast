@@ -594,7 +594,7 @@ with tab_whatsapp:
 # ── Manage Groups tab ─────────────────────────────────────────────────────────
 
 with tab_groups:
-    st.subheader("Subgroups")
+    st.subheader("📣 Teams Subgroups")
 
     col_left, col_right = st.columns([1, 2])
 
@@ -656,6 +656,81 @@ with tab_groups:
         groups["hidden"] = new_hidden
         save_groups(groups, profile)
         st.success("Hidden list saved. Refresh the page to see the updated chat list.")
+
+    # ── WhatsApp Groups ────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("💬 WhatsApp Subgroups")
+
+    wa_status_groups = wa_status()
+    if not wa_status_groups or not wa_status_groups.get("ready"):
+        st.info("Start the WhatsApp service and connect to manage WhatsApp groups.")
+    else:
+        wa_groups_edit = load_wa_groups(profile)
+
+        if "wa_chats" not in st.session_state:
+            with st.spinner("Loading WhatsApp chats..."):
+                st.session_state.wa_chats = wa_get_chats()
+        wa_cl = {c["id"]: c["name"] for c in st.session_state.wa_chats}
+
+        wg_col_left, wg_col_right = st.columns([1, 2])
+
+        with wg_col_left:
+            st.write("**Create new subgroup**")
+            wa_new_name = st.text_input("Group name", key="wa_new_name")
+            if st.button("Create", key="wa_create") and wa_new_name.strip():
+                if wa_new_name not in wa_groups_edit["subgroups"]:
+                    wa_groups_edit["subgroups"][wa_new_name] = []
+                    save_wa_groups(wa_groups_edit, profile)
+                    st.success(f'Created "{wa_new_name}"')
+                    st.rerun()
+                else:
+                    st.warning("A group with that name already exists.")
+
+            if wa_groups_edit["subgroups"]:
+                st.write("**Delete subgroup**")
+                wa_del_target = st.selectbox("Select group", list(wa_groups_edit["subgroups"].keys()), key="wa_del_target")
+                if st.button("Delete", type="secondary", key="wa_delete"):
+                    del wa_groups_edit["subgroups"][wa_del_target]
+                    save_wa_groups(wa_groups_edit, profile)
+                    st.rerun()
+
+        with wg_col_right:
+            if wa_groups_edit["subgroups"]:
+                st.write("**Edit contacts in a subgroup**")
+                wa_edit_target = st.selectbox("Select group to edit", list(wa_groups_edit["subgroups"].keys()), key="wa_edit_target")
+                wa_current = wa_groups_edit["subgroups"].get(wa_edit_target, [])
+
+                wa_chosen = st.multiselect(
+                    "Contacts in this group",
+                    options=list(wa_cl.keys()),
+                    default=[cid for cid in wa_current if cid in wa_cl],
+                    format_func=lambda x: wa_cl.get(x, x),
+                    key="wa_chosen"
+                )
+
+                if st.button("Save Changes", type="primary", key="wa_save"):
+                    wa_groups_edit["subgroups"][wa_edit_target] = wa_chosen
+                    save_wa_groups(wa_groups_edit, profile)
+                    st.success("Saved.")
+            else:
+                st.info("Create a subgroup on the left to get started.")
+
+        st.divider()
+        st.subheader("🚫 Hidden WhatsApp Chats")
+        st.caption("Contacts hidden here won't appear in WhatsApp broadcasts.")
+
+        wa_current_hidden = wa_groups_edit.get("hidden", [])
+        wa_new_hidden = st.multiselect(
+            "Select contacts to hide",
+            options=list(wa_cl.keys()),
+            default=[cid for cid in wa_current_hidden if cid in wa_cl],
+            format_func=lambda x: wa_cl.get(x, x),
+            key="wa_hidden_select"
+        )
+        if st.button("Save WA Hidden List", type="primary"):
+            wa_groups_edit["hidden"] = wa_new_hidden
+            save_wa_groups(wa_groups_edit, profile)
+            st.success("Saved.")
 
 # ── Settings tab ──────────────────────────────────────────────────────────────
 
