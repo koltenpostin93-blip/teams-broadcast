@@ -4,6 +4,7 @@ import requests
 from requests.exceptions import Timeout, ConnectionError as ReqConnError
 import json
 import base64
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -539,9 +540,9 @@ with tab_whatsapp:
 
     with st.expander(f"Refine recipients ({len(wa_target_ids)} selected)", expanded=False):
         st.caption("Uncheck any contacts to skip for this send only.")
-        valid_wa_ids = [cid for cid in wa_target_ids if cid in wa_chat_lookup]
+        # Use all saved IDs as options — don't drop ones missing from the current chat fetch
         wa_target_ids = st.multiselect(
-            "WA Recipients", options=valid_wa_ids, default=valid_wa_ids,
+            "WA Recipients", options=wa_target_ids, default=wa_target_ids,
             format_func=lambda x: wa_chat_lookup.get(x, x),
             label_visibility="collapsed", key=f"wa_refine_{st.session_state.wa_message_key}"
         )
@@ -700,10 +701,12 @@ with tab_groups:
                 wa_edit_target = st.selectbox("Select group to edit", list(wa_groups_edit["subgroups"].keys()), key="wa_edit_target")
                 wa_current = wa_groups_edit["subgroups"].get(wa_edit_target, [])
 
+                # Include any already-saved IDs in the options even if not in current fetch
+                all_wa_options = list({**{c: c for c in wa_current}, **wa_cl}.keys())
                 wa_chosen = st.multiselect(
                     "Contacts in this group",
-                    options=list(wa_cl.keys()),
-                    default=[cid for cid in wa_current if cid in wa_cl],
+                    options=all_wa_options,
+                    default=wa_current,
                     format_func=lambda x: wa_cl.get(x, x),
                     key="wa_chosen"
                 )
