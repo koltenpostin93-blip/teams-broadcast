@@ -347,6 +347,10 @@ if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 if "message_key" not in st.session_state:
     st.session_state.message_key = 0
+if "last_teams_send" not in st.session_state:
+    st.session_state.last_teams_send = 0.0
+if "last_wa_send" not in st.session_state:
+    st.session_state.last_wa_send = 0.0
 
 # ── Sign-in screen ────────────────────────────────────────────────────────────
 
@@ -444,9 +448,14 @@ with tab_broadcast:
     st.caption(f"{len(target_ids)} chat(s) selected")
 
     has_content = message.strip() or uploaded_files
-    send_clicked = st.button("Send Message", type="primary", disabled=not has_content)
+    teams_cooldown = (time.time() - st.session_state.last_teams_send) < 15
+    send_clicked = st.button("Send Message", type="primary",
+                             disabled=not has_content or teams_cooldown)
+    if teams_cooldown:
+        secs_left = max(1, int(15 - (time.time() - st.session_state.last_teams_send)))
+        st.caption(f"⏳ Send cooldown — button re-enables in {secs_left}s")
 
-    if send_clicked:
+    if send_clicked and not teams_cooldown:
         if not target_ids:
             st.warning("No chats in the selected group.")
         else:
@@ -476,6 +485,7 @@ with tab_broadcast:
                     bar.progress(done / total, text=f"Sending... {done}/{total}")
 
             bar.empty()
+            st.session_state.last_teams_send = time.time()
             if failed == 0:
                 st.success(f"Sent to all {success} chats successfully.")
                 st.session_state.uploader_key += 1
@@ -561,8 +571,15 @@ with tab_whatsapp:
     st.caption(f"{len(wa_target_ids)} chat(s) selected")
 
     wa_has_content = wa_message.strip() or wa_uploaded
-    if st.button("Send WhatsApp Message", type="primary", disabled=not wa_has_content):
-        if not wa_target_ids:
+    wa_cooldown = (time.time() - st.session_state.last_wa_send) < 15
+    if wa_cooldown:
+        secs_left = max(1, int(15 - (time.time() - st.session_state.last_wa_send)))
+        st.caption(f"⏳ Send cooldown — button re-enables in {secs_left}s")
+    if st.button("Send WhatsApp Message", type="primary",
+                 disabled=not wa_has_content or wa_cooldown):
+        if wa_cooldown:
+            pass  # button was disabled, shouldn't reach here
+        elif not wa_target_ids:
             st.warning("No chats selected.")
         else:
             images = [(f.read(), f.type) for f in wa_uploaded] if wa_uploaded else None
@@ -585,6 +602,7 @@ with tab_whatsapp:
                 time.sleep(0.5)  # small delay to avoid WhatsApp rate limiting
 
             bar.empty()
+            st.session_state.last_wa_send = time.time()
 
             if wa_failed == 0:
                 st.success(f"Sent to all {wa_success} chats successfully.")
