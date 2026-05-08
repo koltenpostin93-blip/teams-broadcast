@@ -313,6 +313,11 @@ with st.sidebar:
     st.caption(f"Groups key: `groups_{profile}`")
     raw = sb_get(f"groups_{profile}")
     st.caption(f"Subgroups found: {list(raw['subgroups'].keys()) if raw else 'None'}")
+    try:
+        all_keys = [r["key"] for r in get_supabase().table("app_data").select("key").execute().data]
+        st.caption(f"All DB keys: {all_keys}")
+    except Exception as e:
+        st.caption(f"DB list error: {e}")
     if st.button("Switch User"):
         st.session_state.clear()
         st.rerun()
