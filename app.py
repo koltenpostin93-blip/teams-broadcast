@@ -489,8 +489,6 @@ with tab_broadcast:
 
             bar.empty()
             st.session_state.last_teams_send = time.time()
-            # Explicitly wipe the current widget value then rotate the key
-            st.session_state[f"message_{st.session_state.message_key}"] = ""
             st.session_state.uploader_key += 1
             st.session_state.message_key += 1
             if failed == 0:
@@ -612,8 +610,6 @@ with tab_whatsapp:
 
             bar.empty()
             st.session_state.last_wa_send = time.time()
-            # Explicitly wipe the current widget value then rotate the key
-            st.session_state[f"wa_message_{st.session_state.wa_message_key}"] = ""
             st.session_state.wa_uploader_key += 1
             st.session_state.wa_message_key += 1
 
