@@ -486,16 +486,18 @@ with tab_broadcast:
 
             bar.empty()
             st.session_state.last_teams_send = time.time()
+            # Always clear the compose fields after any send attempt
+            st.session_state.uploader_key += 1
+            st.session_state.message_key += 1
             if failed == 0:
                 st.success(f"Sent to all {success} chats successfully.")
-                st.session_state.uploader_key += 1
-                st.session_state.message_key += 1
                 st.rerun()
             else:
                 st.warning(f"Sent: {success}  |  Failed: {failed}")
                 with st.expander("Show errors"):
                     for e in errors:
                         st.markdown(e)
+                st.rerun()
 
 # ── WhatsApp Broadcast tab ───────────────────────────────────────────────────
 
@@ -603,17 +605,19 @@ with tab_whatsapp:
 
             bar.empty()
             st.session_state.last_wa_send = time.time()
+            # Always clear the compose fields after any send attempt
+            st.session_state.wa_uploader_key += 1
+            st.session_state.wa_message_key += 1
 
             if wa_failed == 0:
                 st.success(f"Sent to all {wa_success} chats successfully.")
-                st.session_state.wa_uploader_key += 1
-                st.session_state.wa_message_key += 1
                 st.rerun()
             else:
                 st.warning(f"Sent: {wa_success}  |  Failed: {wa_failed}")
                 with st.expander("Show errors"):
                     for e in wa_errors:
                         st.markdown(e)
+                st.rerun()
 
     st.divider()
     col1, col2 = st.columns(2)
