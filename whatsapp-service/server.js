@@ -19,16 +19,13 @@ app.use(express.json({ limit: "50mb" }));
 
 const PORT = process.env.PORT || 3001;
 const API_KEY = process.env.WA_API_KEY || "jpsi-wa-service";
-const SESSION_DIR = path.join(__dirname, "wa-session");
+const SESSIONS_DIR = path.join(__dirname, "wa-session");
 
 // Silent logger
 const logger = pino({ level: "silent" });
 
-// ── State ─────────────────────────────────────────────────────────────────────
-let sock = null;
-let qrCodeData = null;
-let isReady = false;
-let chatCache = [];
+// ── Sessions map: sessionId -> { sock, isReady, qrCodeData, chatCache } ───────
+const sessions = new Map();
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -38,14 +35,32 @@ app.use((req, res, next) => {
   next();
 });
 
-// ── WhatsApp connection ───────────────────────────────────────────────────────
-async function connectWA() {
-  if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
+// ── Get session ID from request ───────────────────────────────────────────────
+function sessionId(req) {
+  return (req.headers["x-session-id"] || req.query.session || "default")
+    .replace(/[^a-zA-Z0-9_\- ]/g, "_"); // sanitize for filesystem
+}
 
-  const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
+// ── Connect a session ─────────────────────────────────────────────────────────
+async function connectSession(sid) {
+  // If already connecting/connected, skip
+  if (sessions.has(sid) && sessions.get(sid)._connecting) return;
+
+  const SESSION_PATH = path.join(SESSIONS_DIR, sid);
+  if (!fs.existsSync(SESSION_PATH)) fs.mkdirSync(SESSION_PATH, { recursive: true });
+
+  // Init or reuse session state
+  if (!sessions.has(sid)) {
+    sessions.set(sid, { sock: null, isReady: false, qrCodeData: null, chatCache: [], _connecting: true });
+  } else {
+    sessions.get(sid)._connecting = true;
+  }
+  const session = sessions.get(sid);
+
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
   const { version } = await fetchLatestBaileysVersion();
 
-  sock = makeWASocket({
+  const sock = makeWASocket({
     version,
     auth: {
       creds: state.creds,
@@ -57,25 +72,27 @@ async function connectWA() {
     generateHighQualityLinkPreview: false,
   });
 
+  session.sock = sock;
+  session._connecting = false;
+
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log("QR code ready — scan in the app.");
-      qrCodeData = await qrcode.toDataURL(qr);
-      isReady = false;
+      console.log(`[${sid}] QR code ready.`);
+      session.qrCodeData = await qrcode.toDataURL(qr);
+      session.isReady = false;
     }
 
     if (connection === "open") {
-      console.log("WhatsApp connected.");
-      isReady = true;
-      qrCodeData = null;
-      // Pre-load chats
+      console.log(`[${sid}] WhatsApp connected.`);
+      session.isReady = true;
+      session.qrCodeData = null;
       try {
-        const chats = await sock.groupFetchAllParticipating();
-        chatCache = Object.values(chats).map((g) => ({
+        const groups = await sock.groupFetchAllParticipating();
+        session.chatCache = Object.values(groups).map((g) => ({
           id: g.id,
           name: g.subject,
           isGroup: true,
@@ -84,23 +101,24 @@ async function connectWA() {
     }
 
     if (connection === "close") {
-      isReady = false;
+      session.isReady = false;
       const code = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = code !== DisconnectReason.loggedOut;
-      console.log("Connection closed. Reconnect:", shouldReconnect, "Code:", code);
+      console.log(`[${sid}] Connection closed. Reconnect:`, shouldReconnect, "Code:", code);
       if (shouldReconnect) {
-        setTimeout(connectWA, 5000);
+        setTimeout(() => connectSession(sid), 5000);
       } else {
-        // Logged out — clear session
-        fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-        qrCodeData = null;
-        isReady = false;
-        setTimeout(connectWA, 2000);
+        // Logged out — clear session files
+        fs.rmSync(SESSION_PATH, { recursive: true, force: true });
+        session.qrCodeData = null;
+        session.isReady = false;
+        session.chatCache = [];
+        setTimeout(() => connectSession(sid), 2000);
       }
     }
   });
 
-  // Cache DM chats when they come in
+  // Cache DM chats
   sock.ev.on("chats.set", ({ chats }) => {
     const newChats = chats
       .filter((c) => c.name)
@@ -109,41 +127,62 @@ async function connectWA() {
         name: c.name,
         isGroup: c.id.endsWith("@g.us"),
       }));
-    // Merge with existing
-    const ids = new Set(chatCache.map((c) => c.id));
-    newChats.forEach((c) => { if (!ids.has(c.id)) chatCache.push(c); });
+    const ids = new Set(session.chatCache.map((c) => c.id));
+    newChats.forEach((c) => { if (!ids.has(c.id)) session.chatCache.push(c); });
   });
 }
 
-connectWA().catch(console.error);
+// ── Auto-restore saved sessions on startup ────────────────────────────────────
+if (fs.existsSync(SESSIONS_DIR)) {
+  fs.readdirSync(SESSIONS_DIR).forEach((dir) => {
+    const full = path.join(SESSIONS_DIR, dir);
+    if (fs.statSync(full).isDirectory()) {
+      console.log(`Restoring session: ${dir}`);
+      connectSession(dir).catch(console.error);
+    }
+  });
+}
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-app.get("/status", (req, res) => {
-  res.json({ ready: isReady, has_qr: !!qrCodeData, error: null });
+// Ensure a session exists (creates it if not), returns its state
+app.get("/status", async (req, res) => {
+  const sid = sessionId(req);
+  if (!sessions.has(sid)) {
+    connectSession(sid).catch(console.error);
+    return res.json({ ready: false, has_qr: false, initializing: true, error: null });
+  }
+  const s = sessions.get(sid);
+  res.json({ ready: s.isReady, has_qr: !!s.qrCodeData, error: null });
 });
 
 app.get("/qr", (req, res) => {
-  if (isReady) return res.json({ ready: true, qr: null });
-  if (!qrCodeData) return res.json({ ready: false, qr: null, message: "Generating QR code, please wait..." });
-  res.json({ ready: false, qr: qrCodeData });
+  const sid = sessionId(req);
+  if (!sessions.has(sid)) {
+    connectSession(sid).catch(console.error);
+    return res.json({ ready: false, qr: null, message: "Initializing, please wait..." });
+  }
+  const s = sessions.get(sid);
+  if (s.isReady) return res.json({ ready: true, qr: null });
+  if (!s.qrCodeData) return res.json({ ready: false, qr: null, message: "Generating QR code, please wait..." });
+  res.json({ ready: false, qr: s.qrCodeData });
 });
 
 app.get("/chats", async (req, res) => {
-  if (!isReady) return res.status(503).json({ error: "WhatsApp not ready" });
+  const sid = sessionId(req);
+  const s = sessions.get(sid);
+  if (!s || !s.isReady) return res.status(503).json({ error: "WhatsApp not ready" });
   try {
-    // Refresh group list
-    const groups = await sock.groupFetchAllParticipating();
+    const groups = await s.sock.groupFetchAllParticipating();
     const groupList = Object.values(groups).map((g) => ({
       id: g.id,
       name: g.subject,
       isGroup: true,
     }));
-    // Merge with DM cache
     const groupIds = new Set(groupList.map((g) => g.id));
-    const dms = chatCache.filter((c) => !groupIds.has(c.id) && !c.isGroup);
+    const dms = s.chatCache.filter((c) => !groupIds.has(c.id) && !c.isGroup);
     const all = [...groupList, ...dms].sort((a, b) => a.name.localeCompare(b.name));
     res.json(all);
   } catch (err) {
@@ -152,7 +191,9 @@ app.get("/chats", async (req, res) => {
 });
 
 app.post("/send", async (req, res) => {
-  if (!isReady) return res.status(503).json({ error: "WhatsApp not ready" });
+  const sid = sessionId(req);
+  const s = sessions.get(sid);
+  if (!s || !s.isReady) return res.status(503).json({ error: "WhatsApp not ready" });
 
   const { chat_ids, message, image_base64, image_mime, images } = req.body;
   if (!chat_ids?.length) return res.status(400).json({ error: "chat_ids required" });
@@ -167,18 +208,17 @@ app.post("/send", async (req, res) => {
           : [];
 
       if (imgList.length > 0) {
-        // Send first image with caption, subsequent images bare
         for (let i = 0; i < imgList.length; i++) {
           const buf = Buffer.from(imgList[i].base64, "base64");
           const mime = imgList[i].mime || "image/png";
-          await sock.sendMessage(chatId, {
+          await s.sock.sendMessage(chatId, {
             image: buf,
             mimetype: mime,
             caption: i === 0 ? (message || undefined) : undefined,
           });
         }
       } else if (message) {
-        await sock.sendMessage(chatId, { text: message });
+        await s.sock.sendMessage(chatId, { text: message });
       }
       results.push({ chatId, ok: true });
     } catch (err) {
@@ -189,16 +229,18 @@ app.post("/send", async (req, res) => {
 });
 
 app.post("/logout", async (req, res) => {
+  const sid = sessionId(req);
+  const s = sessions.get(sid);
+  if (!s) return res.json({ ok: true });
   try {
-    await sock.logout();
-    fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-    isReady = false;
-    qrCodeData = null;
-    res.json({ ok: true });
-    setTimeout(connectWA, 2000);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    await s.sock.logout();
+  } catch (_) {}
+  const SESSION_PATH = path.join(SESSIONS_DIR, sid);
+  fs.rmSync(SESSION_PATH, { recursive: true, force: true });
+  sessions.delete(sid);
+  res.json({ ok: true });
+  // Recreate fresh session (will generate new QR)
+  setTimeout(() => connectSession(sid), 2000);
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────

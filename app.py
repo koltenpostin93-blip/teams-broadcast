@@ -235,31 +235,34 @@ def chat_label(chat):
 
 # ── WhatsApp helpers ──────────────────────────────────────────────────────────
 
-def wa_headers():
-    return {"x-api-key": WA_API_KEY, "Content-Type": "application/json"}
+def wa_headers(profile=None):
+    h = {"x-api-key": WA_API_KEY, "Content-Type": "application/json"}
+    if profile:
+        h["x-session-id"] = profile
+    return h
 
-def wa_status():
+def wa_status(profile=None):
     try:
-        r = requests.get(f"{WA_SERVICE_URL}/status", headers=wa_headers(), timeout=5)
+        r = requests.get(f"{WA_SERVICE_URL}/status", headers=wa_headers(profile), timeout=8)
         return r.json()
     except Exception:
         return None
 
-def wa_get_qr():
+def wa_get_qr(profile=None):
     try:
-        r = requests.get(f"{WA_SERVICE_URL}/qr", headers=wa_headers(), timeout=5)
+        r = requests.get(f"{WA_SERVICE_URL}/qr", headers=wa_headers(profile), timeout=8)
         return r.json()
     except Exception:
         return None
 
-def wa_get_chats():
+def wa_get_chats(profile=None):
     try:
-        r = requests.get(f"{WA_SERVICE_URL}/chats", headers=wa_headers(), timeout=15)
+        r = requests.get(f"{WA_SERVICE_URL}/chats", headers=wa_headers(profile), timeout=15)
         return r.json() if r.status_code == 200 else []
     except Exception:
         return []
 
-def wa_send_one(chat_id, message, images=None):
+def wa_send_one(chat_id, message, images=None, profile=None):
     """Send a WhatsApp message to a single chat. Returns (ok, error_str).
     images: list of (bytes, mime_type) tuples — first gets the caption, rest follow bare.
     """
@@ -270,7 +273,7 @@ def wa_send_one(chat_id, message, images=None):
             for b, m in images
         ]
     try:
-        r = requests.post(f"{WA_SERVICE_URL}/send", headers=wa_headers(),
+        r = requests.post(f"{WA_SERVICE_URL}/send", headers=wa_headers(profile),
                           json=payload, timeout=60)
         results = r.json().get("results", [])
         if results:
@@ -504,17 +507,20 @@ with tab_broadcast:
 with tab_whatsapp:
     st.subheader("💬 WhatsApp Broadcast")
 
-    status = wa_status()
+    status = wa_status(profile)
 
     if status is None:
         st.error("⚠️ WhatsApp service is not running. Launch **Start WhatsApp Service.bat** on your PC first.")
         st.stop()
 
     if not status.get("ready"):
-        st.info("Scan the QR code below with your phone to connect WhatsApp.")
+        if status.get("initializing"):
+            st.info(f"⏳ Starting WhatsApp session for **{profile}**... refresh in a moment.")
+        else:
+            st.info(f"📱 Scan the QR code below with **{profile}'s** phone to connect WhatsApp.")
         if st.button("🔄 Refresh QR", key="wa_refresh_qr"):
             st.rerun()
-        qr_data = wa_get_qr()
+        qr_data = wa_get_qr(profile)
         if qr_data and qr_data.get("qr"):
             st.image(qr_data["qr"], width=280)
         elif qr_data and qr_data.get("message"):
@@ -528,7 +534,7 @@ with tab_whatsapp:
 
     if "wa_chats" not in st.session_state:
         with st.spinner("Loading WhatsApp chats..."):
-            st.session_state.wa_chats = wa_get_chats()
+            st.session_state.wa_chats = wa_get_chats(profile)
 
     wa_groups = load_wa_groups(profile)
     wa_hidden = set(wa_groups.get("hidden", []))
@@ -592,7 +598,7 @@ with tab_whatsapp:
             wa_errors = []
 
             for cid in wa_target_ids:
-                ok, err = wa_send_one(cid, wa_message, images)
+                ok, err = wa_send_one(cid, wa_message, images, profile)
                 wa_done += 1
                 if ok:
                     wa_success += 1
@@ -623,12 +629,12 @@ with tab_whatsapp:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🔄 Refresh WA chats"):
-            st.session_state.wa_chats = wa_get_chats()
+            st.session_state.wa_chats = wa_get_chats(profile)
             st.success(f"Loaded {len(st.session_state.wa_chats)} chats.")
     with col2:
         if st.button("Disconnect WhatsApp", type="secondary"):
             try:
-                requests.post(f"{WA_SERVICE_URL}/logout", headers=wa_headers(), timeout=5)
+                requests.post(f"{WA_SERVICE_URL}/logout", headers=wa_headers(profile), timeout=5)
                 st.session_state.pop("wa_chats", None)
                 st.rerun()
             except Exception:
@@ -705,15 +711,15 @@ with tab_groups:
     st.divider()
     st.subheader("💬 WhatsApp Subgroups")
 
-    wa_status_groups = wa_status()
+    wa_status_groups = wa_status(profile)
     if not wa_status_groups or not wa_status_groups.get("ready"):
-        st.info("Start the WhatsApp service and connect to manage WhatsApp groups.")
+        st.info("Start the WhatsApp service and connect your WhatsApp account to manage groups.")
     else:
         wa_groups_edit = load_wa_groups(profile)
 
         if "wa_chats" not in st.session_state:
             with st.spinner("Loading WhatsApp chats..."):
-                st.session_state.wa_chats = wa_get_chats()
+                st.session_state.wa_chats = wa_get_chats(profile)
         wa_cl = {c["id"]: c["name"] for c in st.session_state.wa_chats}
 
         wg_col_left, wg_col_right = st.columns([1, 2])
