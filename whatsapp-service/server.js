@@ -154,21 +154,29 @@ app.get("/chats", async (req, res) => {
 app.post("/send", async (req, res) => {
   if (!isReady) return res.status(503).json({ error: "WhatsApp not ready" });
 
-  const { chat_ids, message, image_base64, image_mime } = req.body;
+  const { chat_ids, message, image_base64, image_mime, images } = req.body;
   if (!chat_ids?.length) return res.status(400).json({ error: "chat_ids required" });
 
   const results = [];
   for (const chatId of chat_ids) {
     try {
-      if (image_base64) {
-        const buf = Buffer.from(image_base64, "base64");
-        const mime = image_mime || "image/png";
-        const msgType = mime.startsWith("image/") ? "image" : "document";
-        await sock.sendMessage(chatId, {
-          [msgType]: buf,
-          mimetype: mime,
-          caption: message || undefined,
-        });
+      const imgList = images && images.length > 0
+        ? images
+        : image_base64
+          ? [{ base64: image_base64, mime: image_mime || "image/png" }]
+          : [];
+
+      if (imgList.length > 0) {
+        // Send first image with caption, subsequent images bare
+        for (let i = 0; i < imgList.length; i++) {
+          const buf = Buffer.from(imgList[i].base64, "base64");
+          const mime = imgList[i].mime || "image/png";
+          await sock.sendMessage(chatId, {
+            image: buf,
+            mimetype: mime,
+            caption: i === 0 ? (message || undefined) : undefined,
+          });
+        }
       } else if (message) {
         await sock.sendMessage(chatId, { text: message });
       }

@@ -259,12 +259,16 @@ def wa_get_chats():
     except Exception:
         return []
 
-def wa_send_one(chat_id, message, image_bytes=None, image_mime=None):
-    """Send a WhatsApp message to a single chat. Returns (ok, error_str)."""
+def wa_send_one(chat_id, message, images=None):
+    """Send a WhatsApp message to a single chat. Returns (ok, error_str).
+    images: list of (bytes, mime_type) tuples — first gets the caption, rest follow bare.
+    """
     payload = {"chat_ids": [chat_id], "message": message}
-    if image_bytes:
-        payload["image_base64"] = base64.b64encode(image_bytes).decode()
-        payload["image_mime"] = image_mime or "image/png"
+    if images:
+        payload["images"] = [
+            {"base64": base64.b64encode(b).decode(), "mime": m or "image/png"}
+            for b, m in images
+        ]
     try:
         r = requests.post(f"{WA_SERVICE_URL}/send", headers=wa_headers(),
                           json=payload, timeout=60)
@@ -528,11 +532,14 @@ with tab_whatsapp:
                               key=f"wa_message_{st.session_state.wa_message_key}")
 
     wa_uploaded = st.file_uploader(
-        "Attach image (optional)", type=["png", "jpg", "jpeg", "gif", "webp"],
+        "Attach images (optional)", type=["png", "jpg", "jpeg", "gif", "webp"],
+        accept_multiple_files=True,
         key=f"wa_uploader_{st.session_state.wa_uploader_key}"
     )
     if wa_uploaded:
-        st.image(wa_uploaded, width=300)
+        cols = st.columns(min(len(wa_uploaded), 4))
+        for i, f in enumerate(wa_uploaded):
+            cols[i % 4].image(f, use_container_width=True)
 
     wa_group_options = ["— All Chats —"] + sorted(wa_groups.get("subgroups", {}).keys())
     wa_selected = st.selectbox("Send to", wa_group_options, key="wa_group_select")
@@ -558,8 +565,7 @@ with tab_whatsapp:
         if not wa_target_ids:
             st.warning("No chats selected.")
         else:
-            img_bytes = wa_uploaded.read() if wa_uploaded else None
-            img_mime = wa_uploaded.type if wa_uploaded else None
+            images = [(f.read(), f.type) for f in wa_uploaded] if wa_uploaded else None
 
             bar = st.progress(0, text="Sending via WhatsApp...")
             wa_success, wa_failed, wa_done = 0, 0, 0
@@ -567,7 +573,7 @@ with tab_whatsapp:
             wa_errors = []
 
             for cid in wa_target_ids:
-                ok, err = wa_send_one(cid, wa_message, img_bytes, img_mime)
+                ok, err = wa_send_one(cid, wa_message, images)
                 wa_done += 1
                 if ok:
                     wa_success += 1
