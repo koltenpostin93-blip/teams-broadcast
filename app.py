@@ -236,7 +236,7 @@ document.querySelectorAll('textarea').forEach(t => t.spellcheck = true);
 # ── Profile selector ──────────────────────────────────────────────────────────
 
 if "profile" not in st.session_state:
-    st.session_state.profile = None
+    st.session_state.profile = st.query_params.get("profile", None)
 
 if not st.session_state.profile:
     st.subheader("Who are you?")
@@ -249,6 +249,7 @@ if not st.session_state.profile:
         with col1:
             if st.button("Continue", type="primary"):
                 st.session_state.profile = selected_profile
+                st.query_params["profile"] = selected_profile
                 st.rerun()
 
     st.divider()
@@ -260,6 +261,7 @@ if not st.session_state.profile:
             profiles.append(name)
             save_profiles(profiles)
         st.session_state.profile = name
+        st.query_params["profile"] = name
         st.rerun()
 
     st.stop()
@@ -324,16 +326,9 @@ chat_lookup = {c["id"]: chat_label(c) for c in chats}
 # Show active profile in sidebar
 with st.sidebar:
     st.markdown(f"**Signed in as:** {profile}")
-    st.caption(f"Groups key: `groups_{profile}`")
-    raw = sb_get(f"groups_{profile}")
-    st.caption(f"Subgroups found: {list(raw['subgroups'].keys()) if raw else 'None'}")
-    try:
-        all_keys = [r["key"] for r in get_supabase().table("app_data").select("key").execute().data]
-        st.caption(f"All DB keys: {all_keys}")
-    except Exception as e:
-        st.caption(f"DB list error: {e}")
     if st.button("Switch User"):
         st.session_state.clear()
+        st.query_params.clear()
         st.rerun()
 
 tab_broadcast, tab_groups, tab_settings = st.tabs(["📣 Broadcast", "👥 Manage Groups", "⚙️ Settings"])
