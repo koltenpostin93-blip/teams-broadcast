@@ -6,6 +6,10 @@
 chat_groups*.json
 profiles.json
 
+# Node
+whatsapp-service/node_modules/
+whatsapp-service/wa-session/
+
 # Python
 __pycache__/
 *.pyc

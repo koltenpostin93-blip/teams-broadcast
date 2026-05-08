@@ -17,6 +17,10 @@ SCOPES = [
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 REQUEST_TIMEOUT = 30  # seconds per Graph API call
 
+# ── WhatsApp service config ───────────────────────────────────────────────────
+WA_SERVICE_URL = st.secrets.get("WA_SERVICE_URL", "http://localhost:3001")
+WA_API_KEY = st.secrets.get("WA_API_KEY", "jpsi-wa-service")
+
 
 # ── Supabase ──────────────────────────────────────────────────────────────────
 
@@ -228,6 +232,51 @@ def chat_label(chat):
     return chat["id"][:24] + "..."
 
 
+# ── WhatsApp helpers ──────────────────────────────────────────────────────────
+
+def wa_headers():
+    return {"x-api-key": WA_API_KEY, "Content-Type": "application/json"}
+
+def wa_status():
+    try:
+        r = requests.get(f"{WA_SERVICE_URL}/status", headers=wa_headers(), timeout=5)
+        return r.json()
+    except Exception:
+        return None
+
+def wa_get_qr():
+    try:
+        r = requests.get(f"{WA_SERVICE_URL}/qr", headers=wa_headers(), timeout=5)
+        return r.json()
+    except Exception:
+        return None
+
+def wa_get_chats():
+    try:
+        r = requests.get(f"{WA_SERVICE_URL}/chats", headers=wa_headers(), timeout=15)
+        return r.json() if r.status_code == 200 else []
+    except Exception:
+        return []
+
+def wa_send(chat_ids, message, image_bytes=None, image_mime=None):
+    payload = {"chat_ids": chat_ids, "message": message}
+    if image_bytes:
+        payload["image_base64"] = base64.b64encode(image_bytes).decode()
+        payload["image_mime"] = image_mime or "image/png"
+    try:
+        r = requests.post(f"{WA_SERVICE_URL}/send", headers=wa_headers(),
+                          json=payload, timeout=REQUEST_TIMEOUT)
+        return r.json().get("results", [])
+    except Exception as e:
+        return [{"chatId": cid, "ok": False, "error": str(e)} for cid in chat_ids]
+
+def load_wa_groups(profile):
+    return sb_get(f"wa_groups_{profile}", {"subgroups": {}, "hidden": []})
+
+def save_wa_groups(groups, profile):
+    sb_set(f"wa_groups_{profile}", groups)
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="Teams Broadcast", page_icon="📣", layout="wide")
@@ -340,7 +389,7 @@ with st.sidebar:
         st.query_params.clear()
         st.rerun()
 
-tab_broadcast, tab_groups, tab_settings = st.tabs(["📣 Broadcast", "👥 Manage Groups", "⚙️ Settings"])
+tab_broadcast, tab_whatsapp, tab_groups, tab_settings = st.tabs(["📣 Teams Broadcast", "💬 WhatsApp Broadcast", "👥 Manage Groups", "⚙️ Settings"])
 
 # ── Broadcast tab ─────────────────────────────────────────────────────────────
 
@@ -428,6 +477,119 @@ with tab_broadcast:
                 with st.expander("Show errors"):
                     for e in errors:
                         st.markdown(e)
+
+# ── WhatsApp Broadcast tab ───────────────────────────────────────────────────
+
+with tab_whatsapp:
+    st.subheader("💬 WhatsApp Broadcast")
+
+    status = wa_status()
+
+    if status is None:
+        st.error("⚠️ WhatsApp service is not running. Launch **Start WhatsApp Service.bat** on your PC first.")
+        st.stop()
+
+    if not status.get("ready"):
+        st.info("Scan the QR code below with your phone to connect WhatsApp.")
+        if st.button("🔄 Refresh QR", key="wa_refresh_qr"):
+            st.rerun()
+        qr_data = wa_get_qr()
+        if qr_data and qr_data.get("qr"):
+            st.image(qr_data["qr"], width=280)
+        elif qr_data and qr_data.get("message"):
+            st.caption(qr_data["message"])
+        else:
+            st.caption("Waiting for QR code...")
+        st.stop()
+
+    # WhatsApp is connected
+    st.success("✅ WhatsApp connected")
+
+    if "wa_chats" not in st.session_state:
+        with st.spinner("Loading WhatsApp chats..."):
+            st.session_state.wa_chats = wa_get_chats()
+
+    wa_groups = load_wa_groups(profile)
+    wa_hidden = set(wa_groups.get("hidden", []))
+    wa_chats = [c for c in st.session_state.wa_chats if c["id"] not in wa_hidden]
+    wa_chat_lookup = {c["id"]: c["name"] for c in wa_chats}
+
+    if "wa_uploader_key" not in st.session_state:
+        st.session_state.wa_uploader_key = 0
+    if "wa_message_key" not in st.session_state:
+        st.session_state.wa_message_key = 0
+
+    wa_message = st.text_area("Message", height=180, placeholder="Type your WhatsApp message here...",
+                              key=f"wa_message_{st.session_state.wa_message_key}")
+
+    wa_uploaded = st.file_uploader(
+        "Attach image (optional)", type=["png", "jpg", "jpeg", "gif", "webp"],
+        key=f"wa_uploader_{st.session_state.wa_uploader_key}"
+    )
+    if wa_uploaded:
+        st.image(wa_uploaded, width=300)
+
+    wa_group_options = ["— All Chats —"] + sorted(wa_groups.get("subgroups", {}).keys())
+    wa_selected = st.selectbox("Send to", wa_group_options, key="wa_group_select")
+
+    if wa_selected == "— All Chats —":
+        wa_target_ids = [c["id"] for c in wa_chats]
+    else:
+        wa_target_ids = wa_groups["subgroups"].get(wa_selected, [])
+
+    with st.expander(f"Refine recipients ({len(wa_target_ids)} selected)", expanded=False):
+        st.caption("Uncheck any contacts to skip for this send only.")
+        valid_wa_ids = [cid for cid in wa_target_ids if cid in wa_chat_lookup]
+        wa_target_ids = st.multiselect(
+            "WA Recipients", options=valid_wa_ids, default=valid_wa_ids,
+            format_func=lambda x: wa_chat_lookup.get(x, x),
+            label_visibility="collapsed", key=f"wa_refine_{st.session_state.wa_message_key}"
+        )
+
+    st.caption(f"{len(wa_target_ids)} chat(s) selected")
+
+    wa_has_content = wa_message.strip() or wa_uploaded
+    if st.button("Send WhatsApp Message", type="primary", disabled=not wa_has_content):
+        if not wa_target_ids:
+            st.warning("No chats selected.")
+        else:
+            img_bytes = wa_uploaded.read() if wa_uploaded else None
+            img_mime = wa_uploaded.type if wa_uploaded else None
+
+            bar = st.progress(0, text="Sending via WhatsApp...")
+            results = wa_send(wa_target_ids, wa_message, img_bytes, img_mime)
+
+            success = sum(1 for r in results if r.get("ok"))
+            failed_results = [r for r in results if not r.get("ok")]
+            bar.empty()
+
+            if not failed_results:
+                st.success(f"Sent to all {success} contacts successfully.")
+                st.session_state.wa_uploader_key += 1
+                st.session_state.wa_message_key += 1
+                st.rerun()
+            else:
+                st.warning(f"Sent: {success}  |  Failed: {len(failed_results)}")
+                with st.expander("Show errors"):
+                    for r in failed_results:
+                        name = wa_chat_lookup.get(r["chatId"], r["chatId"])
+                        st.markdown(f"**{name}**: {r.get('error', 'Unknown error')}")
+
+    st.divider()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔄 Refresh WA chats"):
+            st.session_state.wa_chats = wa_get_chats()
+            st.success(f"Loaded {len(st.session_state.wa_chats)} chats.")
+    with col2:
+        if st.button("Disconnect WhatsApp", type="secondary"):
+            try:
+                requests.post(f"{WA_SERVICE_URL}/logout", headers=wa_headers(), timeout=5)
+                st.session_state.pop("wa_chats", None)
+                st.rerun()
+            except Exception:
+                pass
+
 
 # ── Manage Groups tab ─────────────────────────────────────────────────────────
 
