@@ -6,7 +6,6 @@ import json
 import base64
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from supabase import create_client
 
 CLIENT_ID = "95aa84e5-44b3-4233-94f6-25ca740aff4d"
 TENANT_ID = "4a4f2e28-2f12-4cdb-b5eb-9860e3af1045"
@@ -21,16 +20,23 @@ REQUEST_TIMEOUT = 30  # seconds per Graph API call
 
 # ── Supabase ──────────────────────────────────────────────────────────────────
 
-@st.cache_resource
-def get_supabase():
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+def _sb_headers():
+    key = st.secrets["SUPABASE_KEY"]
+    return {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+def _sb_url(path=""):
+    return f"{st.secrets['SUPABASE_URL']}/rest/v1/{path}"
 
 
 def sb_get(key, default=None):
     try:
-        res = get_supabase().table("app_data").select("value").eq("key", key).execute()
-        if res.data:
-            return json.loads(res.data[0]["value"])
+        resp = requests.get(
+            _sb_url(f"app_data?select=value&key=eq.{requests.utils.quote(key)}"),
+            headers=_sb_headers(), timeout=10
+        )
+        data = resp.json()
+        if data:
+            return json.loads(data[0]["value"])
     except Exception as e:
         st.error(f"Supabase read error ({key}): {e}")
     return default
@@ -38,14 +44,22 @@ def sb_get(key, default=None):
 
 def sb_set(key, value):
     try:
-        get_supabase().table("app_data").upsert({"key": key, "value": json.dumps(value)}).execute()
+        requests.post(
+            _sb_url("app_data"),
+            headers={**_sb_headers(), "Prefer": "resolution=merge-duplicates"},
+            json={"key": key, "value": json.dumps(value)},
+            timeout=10
+        )
     except Exception as e:
         st.error(f"Supabase write error ({key}): {e}")
 
 
 def sb_delete(key):
     try:
-        get_supabase().table("app_data").delete().eq("key", key).execute()
+        requests.delete(
+            _sb_url(f"app_data?key=eq.{requests.utils.quote(key)}"),
+            headers=_sb_headers(), timeout=10
+        )
     except Exception:
         pass
 
