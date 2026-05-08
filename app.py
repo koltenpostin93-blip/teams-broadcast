@@ -259,17 +259,21 @@ def wa_get_chats():
     except Exception:
         return []
 
-def wa_send(chat_ids, message, image_bytes=None, image_mime=None):
-    payload = {"chat_ids": chat_ids, "message": message}
+def wa_send_one(chat_id, message, image_bytes=None, image_mime=None):
+    """Send a WhatsApp message to a single chat. Returns (ok, error_str)."""
+    payload = {"chat_ids": [chat_id], "message": message}
     if image_bytes:
         payload["image_base64"] = base64.b64encode(image_bytes).decode()
         payload["image_mime"] = image_mime or "image/png"
     try:
         r = requests.post(f"{WA_SERVICE_URL}/send", headers=wa_headers(),
-                          json=payload, timeout=REQUEST_TIMEOUT)
-        return r.json().get("results", [])
+                          json=payload, timeout=60)
+        results = r.json().get("results", [])
+        if results:
+            return results[0].get("ok", False), results[0].get("error")
+        return False, "No result returned"
     except Exception as e:
-        return [{"chatId": cid, "ok": False, "error": str(e)} for cid in chat_ids]
+        return False, str(e)
 
 def load_wa_groups(profile):
     return sb_get(f"wa_groups_{profile}", {"subgroups": {}, "hidden": []})
@@ -558,23 +562,34 @@ with tab_whatsapp:
             img_mime = wa_uploaded.type if wa_uploaded else None
 
             bar = st.progress(0, text="Sending via WhatsApp...")
-            results = wa_send(wa_target_ids, wa_message, img_bytes, img_mime)
+            wa_success, wa_failed, wa_done = 0, 0, 0
+            wa_total = len(wa_target_ids)
+            wa_errors = []
 
-            success = sum(1 for r in results if r.get("ok"))
-            failed_results = [r for r in results if not r.get("ok")]
+            for cid in wa_target_ids:
+                ok, err = wa_send_one(cid, wa_message, img_bytes, img_mime)
+                wa_done += 1
+                if ok:
+                    wa_success += 1
+                else:
+                    wa_failed += 1
+                    name = wa_chat_lookup.get(cid, cid)
+                    wa_errors.append(f"**{name}**: {err}")
+                bar.progress(wa_done / wa_total, text=f"Sending... {wa_done}/{wa_total}")
+                time.sleep(0.5)  # small delay to avoid WhatsApp rate limiting
+
             bar.empty()
 
-            if not failed_results:
-                st.success(f"Sent to all {success} contacts successfully.")
+            if wa_failed == 0:
+                st.success(f"Sent to all {wa_success} chats successfully.")
                 st.session_state.wa_uploader_key += 1
                 st.session_state.wa_message_key += 1
                 st.rerun()
             else:
-                st.warning(f"Sent: {success}  |  Failed: {len(failed_results)}")
+                st.warning(f"Sent: {wa_success}  |  Failed: {wa_failed}")
                 with st.expander("Show errors"):
-                    for r in failed_results:
-                        name = wa_chat_lookup.get(r["chatId"], r["chatId"])
-                        st.markdown(f"**{name}**: {r.get('error', 'Unknown error')}")
+                    for e in wa_errors:
+                        st.markdown(e)
 
     st.divider()
     col1, col2 = st.columns(2)
