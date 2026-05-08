@@ -1,7 +1,17 @@
 const express = require("express");
 const cors = require("cors");
-const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const qrcode = require("qrcode");
+const pino = require("pino");
+const path = require("path");
+const fs = require("fs");
+
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+} = require("@whiskeysockets/baileys");
 
 const app = express();
 app.use(cors());
@@ -9,149 +19,179 @@ app.use(express.json({ limit: "50mb" }));
 
 const PORT = process.env.PORT || 3001;
 const API_KEY = process.env.WA_API_KEY || "jpsi-wa-service";
+const SESSION_DIR = path.join(__dirname, "wa-session");
 
-// ── Auth middleware ────────────────────────────────────────────────────────────
+// Silent logger
+const logger = pino({ level: "silent" });
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let sock = null;
+let qrCodeData = null;
+let isReady = false;
+let chatCache = [];
+
+// ── Auth middleware ───────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   if (req.path === "/health") return next();
-  const key = req.headers["x-api-key"];
-  if (key !== API_KEY) return res.status(401).json({ error: "Unauthorized" });
+  if (req.headers["x-api-key"] !== API_KEY)
+    return res.status(401).json({ error: "Unauthorized" });
   next();
 });
 
-// ── WhatsApp client ───────────────────────────────────────────────────────────
-let qrCodeData = null;
-let isReady = false;
-let clientError = null;
+// ── WhatsApp connection ───────────────────────────────────────────────────────
+async function connectWA() {
+  if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
-const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: "./wa-session" }),
-  puppeteer: {
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"],
-  },
-});
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
+  const { version } = await fetchLatestBaileysVersion();
 
-client.on("qr", async (qr) => {
-  isReady = false;
-  clientError = null;
-  try {
-    qrCodeData = await qrcode.toDataURL(qr);
-    console.log("QR code ready — scan in the app.");
-  } catch (err) {
-    console.error("QR error:", err);
-  }
-});
+  sock = makeWASocket({
+    version,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
+    logger,
+    printQRInTerminal: false,
+    browser: ["Teams Broadcast", "Chrome", "1.0"],
+    generateHighQualityLinkPreview: false,
+  });
 
-client.on("ready", () => {
-  isReady = true;
-  qrCodeData = null;
-  console.log("WhatsApp client ready.");
-});
+  sock.ev.on("creds.update", saveCreds);
 
-client.on("disconnected", (reason) => {
-  isReady = false;
-  clientError = reason;
-  console.log("WhatsApp disconnected:", reason);
-});
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect, qr } = update;
 
-client.on("auth_failure", (msg) => {
-  isReady = false;
-  clientError = msg;
-  console.error("Auth failure:", msg);
-});
+    if (qr) {
+      console.log("QR code ready — scan in the app.");
+      qrCodeData = await qrcode.toDataURL(qr);
+      isReady = false;
+    }
 
-client.initialize();
+    if (connection === "open") {
+      console.log("WhatsApp connected.");
+      isReady = true;
+      qrCodeData = null;
+      // Pre-load chats
+      try {
+        const chats = await sock.groupFetchAllParticipating();
+        chatCache = Object.values(chats).map((g) => ({
+          id: g.id,
+          name: g.subject,
+          isGroup: true,
+        }));
+      } catch (_) {}
+    }
+
+    if (connection === "close") {
+      isReady = false;
+      const code = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = code !== DisconnectReason.loggedOut;
+      console.log("Connection closed. Reconnect:", shouldReconnect, "Code:", code);
+      if (shouldReconnect) {
+        setTimeout(connectWA, 5000);
+      } else {
+        // Logged out — clear session
+        fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+        qrCodeData = null;
+        isReady = false;
+        setTimeout(connectWA, 2000);
+      }
+    }
+  });
+
+  // Cache DM chats when they come in
+  sock.ev.on("chats.set", ({ chats }) => {
+    const newChats = chats
+      .filter((c) => c.name)
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        isGroup: c.id.endsWith("@g.us"),
+      }));
+    // Merge with existing
+    const ids = new Set(chatCache.map((c) => c.id));
+    newChats.forEach((c) => { if (!ids.has(c.id)) chatCache.push(c); });
+  });
+}
+
+connectWA().catch(console.error);
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
-// Health check (no auth needed)
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
-});
+app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-// WhatsApp connection status
 app.get("/status", (req, res) => {
-  res.json({
-    ready: isReady,
-    has_qr: !!qrCodeData,
-    error: clientError,
-  });
+  res.json({ ready: isReady, has_qr: !!qrCodeData, error: null });
 });
 
-// Get QR code as base64 data URL
 app.get("/qr", (req, res) => {
   if (isReady) return res.json({ ready: true, qr: null });
-  if (!qrCodeData) return res.json({ ready: false, qr: null, message: "QR not generated yet, please wait..." });
+  if (!qrCodeData) return res.json({ ready: false, qr: null, message: "Generating QR code, please wait..." });
   res.json({ ready: false, qr: qrCodeData });
 });
 
-// Get all chats
 app.get("/chats", async (req, res) => {
   if (!isReady) return res.status(503).json({ error: "WhatsApp not ready" });
   try {
-    const chats = await client.getChats();
-    const result = chats
-      .filter((c) => c.name)
-      .map((c) => ({
-        id: c.id._serialized,
-        name: c.name,
-        isGroup: c.isGroup,
-        unreadCount: c.unreadCount,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-    res.json(result);
+    // Refresh group list
+    const groups = await sock.groupFetchAllParticipating();
+    const groupList = Object.values(groups).map((g) => ({
+      id: g.id,
+      name: g.subject,
+      isGroup: true,
+    }));
+    // Merge with DM cache
+    const groupIds = new Set(groupList.map((g) => g.id));
+    const dms = chatCache.filter((c) => !groupIds.has(c.id) && !c.isGroup);
+    const all = [...groupList, ...dms].sort((a, b) => a.name.localeCompare(b.name));
+    res.json(all);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Send message to one or more chats
 app.post("/send", async (req, res) => {
   if (!isReady) return res.status(503).json({ error: "WhatsApp not ready" });
 
   const { chat_ids, message, image_base64, image_mime } = req.body;
-  if (!chat_ids || !chat_ids.length) {
-    return res.status(400).json({ error: "chat_ids required" });
-  }
+  if (!chat_ids?.length) return res.status(400).json({ error: "chat_ids required" });
 
   const results = [];
-
   for (const chatId of chat_ids) {
     try {
       if (image_base64) {
-        const media = new MessageMedia(
-          image_mime || "image/png",
-          image_base64,
-          "image"
-        );
-        await client.sendMessage(chatId, media, {
+        const buf = Buffer.from(image_base64, "base64");
+        const mime = image_mime || "image/png";
+        const msgType = mime.startsWith("image/") ? "image" : "document";
+        await sock.sendMessage(chatId, {
+          [msgType]: buf,
+          mimetype: mime,
           caption: message || undefined,
         });
       } else if (message) {
-        await client.sendMessage(chatId, message);
+        await sock.sendMessage(chatId, { text: message });
       }
       results.push({ chatId, ok: true });
     } catch (err) {
       results.push({ chatId, ok: false, error: err.message });
     }
   }
-
   res.json({ results });
 });
 
-// Logout / reset session
 app.post("/logout", async (req, res) => {
   try {
-    await client.logout();
+    await sock.logout();
+    fs.rmSync(SESSION_DIR, { recursive: true, force: true });
     isReady = false;
     qrCodeData = null;
     res.json({ ok: true });
+    setTimeout(connectWA, 2000);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── Start server ──────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`WhatsApp service running on port ${PORT}`);
-});
+// ── Start ─────────────────────────────────────────────────────────────────────
+app.listen(PORT, () => console.log(`WhatsApp service running on port ${PORT}`));
