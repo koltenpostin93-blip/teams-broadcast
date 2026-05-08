@@ -103,8 +103,10 @@ def get_cached_token(profile):
     cache = load_cache(profile)
     app = build_app(cache)
     accounts = app.get_accounts()
+    st.sidebar.caption(f"DEBUG: cache loaded={bool(cache.serialize() != '{}')}, accounts={len(accounts)}")
     if accounts:
         result = app.acquire_token_silent(SCOPES, account=accounts[0])
+        st.sidebar.caption(f"DEBUG: silent result keys={list(result.keys()) if result else 'None'}")
         if result and "access_token" in result:
             save_cache(cache, profile)
             return result["access_token"]
