@@ -147,7 +147,7 @@ def headers(token):
 
 
 def fetch_chats(token):
-    chats, url = [], f"{GRAPH_BASE}/me/chats?$top=50"
+    chats, url = [], f"{GRAPH_BASE}/me/chats?$top=50&$orderby=lastMessagePreview/createdDateTime desc"
     while url:
         resp = requests.get(url, headers=headers(token), timeout=REQUEST_TIMEOUT)
         if resp.status_code != 200:
@@ -350,6 +350,8 @@ if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 if "message_key" not in st.session_state:
     st.session_state.message_key = 0
+if "teams_msg" not in st.session_state:
+    st.session_state.teams_msg = ""
 if "last_teams_send" not in st.session_state:
     st.session_state.last_teams_send = 0.0
 if "last_wa_send" not in st.session_state:
@@ -413,7 +415,7 @@ with tab_broadcast:
     st.subheader("Compose & Send")
 
     message = st.text_area("Message", height=180, placeholder="Type your message here...",
-                           key=f"message_{st.session_state.message_key}")
+                           key="teams_msg")
 
     uploaded_files = st.file_uploader(
         "Attach images (optional)",
@@ -438,11 +440,11 @@ with tab_broadcast:
 
     with st.expander(f"Refine recipients ({len(target_ids)} selected)", expanded=False):
         st.caption("Uncheck any chats to skip them for this send only — does not modify the saved group.")
-        valid_ids = [cid for cid in target_ids if cid in chat_lookup]
+        # Use all saved IDs — don't drop ones missing from the current chat fetch
         target_ids = st.multiselect(
             "Recipients",
-            options=valid_ids,
-            default=valid_ids,
+            options=target_ids,
+            default=target_ids,
             format_func=lambda x: chat_lookup.get(x, x),
             label_visibility="collapsed",
             key=f"refine_{st.session_state.message_key}",
@@ -491,15 +493,15 @@ with tab_broadcast:
             st.session_state.last_teams_send = time.time()
             st.session_state.uploader_key += 1
             st.session_state.message_key += 1
+            st.session_state.teams_msg = ""  # clear message box
             if failed == 0:
                 st.success(f"Sent to all {success} chats successfully.")
-                st.rerun()
             else:
                 st.warning(f"Sent: {success}  |  Failed: {failed}")
                 with st.expander("Show errors"):
                     for e in errors:
                         st.markdown(e)
-                st.rerun()
+            st.rerun()
 
 # ── WhatsApp Broadcast tab ───────────────────────────────────────────────────
 
