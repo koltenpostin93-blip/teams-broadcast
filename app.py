@@ -350,10 +350,21 @@ if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 if "message_key" not in st.session_state:
     st.session_state.message_key = 0
-if "teams_msg" not in st.session_state:
-    st.session_state.teams_msg = ""
 if "last_teams_send" not in st.session_state:
     st.session_state.last_teams_send = 0.0
+if "last_wa_send" not in st.session_state:
+    st.session_state.last_wa_send = 0.0
+if "wa_uploader_key" not in st.session_state:
+    st.session_state.wa_uploader_key = 0
+if "wa_message_key" not in st.session_state:
+    st.session_state.wa_message_key = 0
+# Rotate keys at the TOP of the run after a send, before any widget renders
+if st.session_state.pop("_teams_sent", False):
+    st.session_state.message_key += 1
+    st.session_state.uploader_key += 1
+if st.session_state.pop("_wa_sent", False):
+    st.session_state.wa_message_key += 1
+    st.session_state.wa_uploader_key += 1
 if "last_wa_send" not in st.session_state:
     st.session_state.last_wa_send = 0.0
 
@@ -491,8 +502,7 @@ with tab_broadcast:
 
             bar.empty()
             st.session_state.last_teams_send = time.time()
-            st.session_state.uploader_key += 1
-            st.session_state.message_key += 1
+            st.session_state._teams_sent = True  # keys rotate at top of next run
             if failed == 0:
                 st.success(f"Sent to all {success} chats successfully.")
             else:
@@ -540,11 +550,6 @@ with tab_whatsapp:
     wa_hidden = set(wa_groups.get("hidden", []))
     wa_chats = [c for c in st.session_state.wa_chats if c["id"] not in wa_hidden]
     wa_chat_lookup = {c["id"]: c["name"] for c in wa_chats}
-
-    if "wa_uploader_key" not in st.session_state:
-        st.session_state.wa_uploader_key = 0
-    if "wa_message_key" not in st.session_state:
-        st.session_state.wa_message_key = 0
 
     wa_message = st.text_area("Message", height=180, placeholder="Type your WhatsApp message here...",
                               key=f"wa_message_{st.session_state.wa_message_key}")
@@ -611,8 +616,7 @@ with tab_whatsapp:
 
             bar.empty()
             st.session_state.last_wa_send = time.time()
-            st.session_state.wa_uploader_key += 1
-            st.session_state.wa_message_key += 1
+            st.session_state._wa_sent = True  # keys rotate at top of next run
 
             if wa_failed == 0:
                 st.success(f"Sent to all {wa_success} chats successfully.")
