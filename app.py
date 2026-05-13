@@ -358,6 +358,10 @@ if "wa_uploader_key" not in st.session_state:
     st.session_state.wa_uploader_key = 0
 if "wa_message_key" not in st.session_state:
     st.session_state.wa_message_key = 0
+if "wa_status_cache" not in st.session_state:
+    st.session_state.wa_status_cache = None
+if "wa_status_ts" not in st.session_state:
+    st.session_state.wa_status_ts = 0.0
 # Rotate keys at the TOP of the run after a send, before any widget renders
 if st.session_state.pop("_teams_sent", False):
     st.session_state.message_key += 1
@@ -365,8 +369,6 @@ if st.session_state.pop("_teams_sent", False):
 if st.session_state.pop("_wa_sent", False):
     st.session_state.wa_message_key += 1
     st.session_state.wa_uploader_key += 1
-if "last_wa_send" not in st.session_state:
-    st.session_state.last_wa_send = 0.0
 
 # ── Sign-in screen ────────────────────────────────────────────────────────────
 
@@ -517,18 +519,25 @@ with tab_broadcast:
 with tab_whatsapp:
     st.subheader("💬 WhatsApp Broadcast")
 
-    status = wa_status(profile)
+    # Cache WA status for 20s so Teams sends don't trigger a slow tunnel hit
+    if time.time() - st.session_state.wa_status_ts > 20:
+        st.session_state.wa_status_cache = wa_status(profile)
+        st.session_state.wa_status_ts = time.time()
+    status = st.session_state.wa_status_cache
+
+    if st.button("🔄 Check WhatsApp Status", key="wa_check_status"):
+        st.session_state.wa_status_ts = 0.0  # force refresh on next render
+        st.rerun()
 
     if status is None:
         st.error("⚠️ WhatsApp service is not running. Launch **Start WhatsApp Service.bat** on your PC first.")
-        st.stop()
-
-    if not status.get("ready"):
+    elif not status.get("ready"):
         if status.get("initializing"):
             st.info(f"⏳ Starting WhatsApp session for **{profile}**... refresh in a moment.")
         else:
             st.info(f"📱 Scan the QR code below with **{profile}'s** phone to connect WhatsApp.")
         if st.button("🔄 Refresh QR", key="wa_refresh_qr"):
+            st.session_state.wa_status_ts = 0.0
             st.rerun()
         qr_data = wa_get_qr(profile)
         if qr_data and qr_data.get("qr"):
@@ -537,111 +546,108 @@ with tab_whatsapp:
             st.caption(qr_data["message"])
         else:
             st.caption("Waiting for QR code...")
-        st.stop()
-
-    # WhatsApp is connected
-    st.success("✅ WhatsApp connected")
-
-    if "wa_chats" not in st.session_state:
-        with st.spinner("Loading WhatsApp chats..."):
-            st.session_state.wa_chats = wa_get_chats(profile)
-
-    wa_groups = load_wa_groups(profile)
-    wa_hidden = set(wa_groups.get("hidden", []))
-    wa_chats = [c for c in st.session_state.wa_chats if c["id"] not in wa_hidden]
-    wa_chat_lookup = {c["id"]: c["name"] for c in wa_chats}
-
-    wa_message = st.text_area("Message", height=180, placeholder="Type your WhatsApp message here...",
-                              key=f"wa_message_{st.session_state.wa_message_key}")
-
-    wa_uploaded = st.file_uploader(
-        "Attach images (optional)", type=["png", "jpg", "jpeg", "gif", "webp"],
-        accept_multiple_files=True,
-        key=f"wa_uploader_{st.session_state.wa_uploader_key}"
-    )
-    if wa_uploaded:
-        cols = st.columns(min(len(wa_uploaded), 4))
-        for i, f in enumerate(wa_uploaded):
-            cols[i % 4].image(f, use_container_width=True)
-
-    wa_group_options = ["— All Chats —"] + sorted(wa_groups.get("subgroups", {}).keys())
-    wa_selected = st.selectbox("Send to", wa_group_options, key="wa_group_select")
-
-    if wa_selected == "— All Chats —":
-        wa_target_ids = [c["id"] for c in wa_chats]
     else:
-        wa_target_ids = wa_groups["subgroups"].get(wa_selected, [])
+        # WhatsApp is connected — show broadcast UI
+        st.success("✅ WhatsApp connected")
 
-    with st.expander(f"Refine recipients ({len(wa_target_ids)} selected)", expanded=False):
-        st.caption("Uncheck any contacts to skip for this send only.")
-        # Use all saved IDs as options — don't drop ones missing from the current chat fetch
-        wa_target_ids = st.multiselect(
-            "WA Recipients", options=wa_target_ids, default=wa_target_ids,
-            format_func=lambda x: wa_chat_lookup.get(x, x),
-            label_visibility="collapsed", key=f"wa_refine_{st.session_state.wa_message_key}"
+        if "wa_chats" not in st.session_state:
+            with st.spinner("Loading WhatsApp chats..."):
+                st.session_state.wa_chats = wa_get_chats(profile)
+
+        wa_groups = load_wa_groups(profile)
+        wa_hidden = set(wa_groups.get("hidden", []))
+        wa_chats = [c for c in st.session_state.wa_chats if c["id"] not in wa_hidden]
+        wa_chat_lookup = {c["id"]: c["name"] for c in wa_chats}
+
+        wa_message = st.text_area("Message", height=180, placeholder="Type your WhatsApp message here...",
+                                  key=f"wa_message_{st.session_state.wa_message_key}")
+
+        wa_uploaded = st.file_uploader(
+            "Attach images (optional)", type=["png", "jpg", "jpeg", "gif", "webp"],
+            accept_multiple_files=True,
+            key=f"wa_uploader_{st.session_state.wa_uploader_key}"
         )
+        if wa_uploaded:
+            cols = st.columns(min(len(wa_uploaded), 4))
+            for i, f in enumerate(wa_uploaded):
+                cols[i % 4].image(f, use_container_width=True)
 
-    st.caption(f"{len(wa_target_ids)} chat(s) selected")
+        wa_group_options = ["— All Chats —"] + sorted(wa_groups.get("subgroups", {}).keys())
+        wa_selected = st.selectbox("Send to", wa_group_options, key="wa_group_select")
 
-    wa_has_content = wa_message.strip() or wa_uploaded
-    wa_cooldown = (time.time() - st.session_state.last_wa_send) < 15
-    if wa_cooldown:
-        secs_left = max(1, int(15 - (time.time() - st.session_state.last_wa_send)))
-        st.caption(f"⏳ Send cooldown — button re-enables in {secs_left}s")
-    if st.button("Send WhatsApp Message", type="primary",
-                 disabled=not wa_has_content or wa_cooldown):
-        if wa_cooldown:
-            pass  # button was disabled, shouldn't reach here
-        elif not wa_target_ids:
-            st.warning("No chats selected.")
+        if wa_selected == "— All Chats —":
+            wa_target_ids = [c["id"] for c in wa_chats]
         else:
-            images = [(f.read(), f.type) for f in wa_uploaded] if wa_uploaded else None
+            wa_target_ids = wa_groups["subgroups"].get(wa_selected, [])
 
-            bar = st.progress(0, text="Sending via WhatsApp...")
-            wa_success, wa_failed, wa_done = 0, 0, 0
-            wa_total = len(wa_target_ids)
-            wa_errors = []
+        with st.expander(f"Refine recipients ({len(wa_target_ids)} selected)", expanded=False):
+            st.caption("Uncheck any contacts to skip for this send only.")
+            wa_target_ids = st.multiselect(
+                "WA Recipients", options=wa_target_ids, default=wa_target_ids,
+                format_func=lambda x: wa_chat_lookup.get(x, x),
+                label_visibility="collapsed", key=f"wa_refine_{st.session_state.wa_message_key}"
+            )
 
-            for cid in wa_target_ids:
-                ok, err = wa_send_one(cid, wa_message, images, profile)
-                wa_done += 1
-                if ok:
-                    wa_success += 1
-                else:
-                    wa_failed += 1
-                    name = wa_chat_lookup.get(cid, cid)
-                    wa_errors.append(f"**{name}**: {err}")
-                bar.progress(wa_done / wa_total, text=f"Sending... {wa_done}/{wa_total}")
-                time.sleep(0.5)  # small delay to avoid WhatsApp rate limiting
+        st.caption(f"{len(wa_target_ids)} chat(s) selected")
 
-            bar.empty()
-            st.session_state.last_wa_send = time.time()
-            st.session_state._wa_sent = True  # keys rotate at top of next run
-
-            if wa_failed == 0:
-                st.success(f"Sent to all {wa_success} chats successfully.")
-                st.rerun()
+        wa_has_content = wa_message.strip() or wa_uploaded
+        wa_cooldown = (time.time() - st.session_state.last_wa_send) < 15
+        if wa_cooldown:
+            secs_left = max(1, int(15 - (time.time() - st.session_state.last_wa_send)))
+            st.caption(f"⏳ Send cooldown — button re-enables in {secs_left}s")
+        if st.button("Send WhatsApp Message", type="primary",
+                     disabled=not wa_has_content or wa_cooldown):
+            if not wa_target_ids:
+                st.warning("No chats selected.")
             else:
-                st.warning(f"Sent: {wa_success}  |  Failed: {wa_failed}")
-                with st.expander("Show errors"):
-                    for e in wa_errors:
-                        st.markdown(e)
+                images = [(f.read(), f.type) for f in wa_uploaded] if wa_uploaded else None
+
+                bar = st.progress(0, text="Sending via WhatsApp...")
+                wa_success, wa_failed, wa_done = 0, 0, 0
+                wa_total = len(wa_target_ids)
+                wa_errors = []
+
+                for cid in wa_target_ids:
+                    ok, err = wa_send_one(cid, wa_message, images, profile)
+                    wa_done += 1
+                    if ok:
+                        wa_success += 1
+                    else:
+                        wa_failed += 1
+                        name = wa_chat_lookup.get(cid, cid)
+                        wa_errors.append(f"**{name}**: {err}")
+                    bar.progress(wa_done / wa_total, text=f"Sending... {wa_done}/{wa_total}")
+                    time.sleep(0.5)
+
+                bar.empty()
+                st.session_state.last_wa_send = time.time()
+                st.session_state._wa_sent = True
+                st.session_state.wa_status_ts = 0.0  # force status recheck after send
+
+                if wa_failed == 0:
+                    st.success(f"Sent to all {wa_success} chats successfully.")
+                else:
+                    st.warning(f"Sent: {wa_success}  |  Failed: {wa_failed}")
+                    with st.expander("Show errors"):
+                        for e in wa_errors:
+                            st.markdown(e)
                 st.rerun()
 
-    st.divider()
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔄 Refresh WA chats"):
-            st.session_state.wa_chats = wa_get_chats(profile)
-            st.success(f"Loaded {len(st.session_state.wa_chats)} chats.")
-    with col2:
-        if st.button("Disconnect WhatsApp", type="secondary"):
-            try:
-                requests.post(f"{WA_SERVICE_URL}/logout", headers=wa_headers(profile), timeout=5)
-                st.session_state.pop("wa_chats", None)
-                st.rerun()
-            except Exception:
-                pass
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Refresh WA chats"):
+                st.session_state.wa_chats = wa_get_chats(profile)
+                st.success(f"Loaded {len(st.session_state.wa_chats)} chats.")
+        with col2:
+            if st.button("Disconnect WhatsApp", type="secondary"):
+                try:
+                    requests.post(f"{WA_SERVICE_URL}/logout", headers=wa_headers(profile), timeout=5)
+                    st.session_state.pop("wa_chats", None)
+                    st.session_state.wa_status_ts = 0.0
+                    st.rerun()
+                except Exception:
+                    pass
 
 
 # ── Manage Groups tab ─────────────────────────────────────────────────────────
@@ -714,7 +720,7 @@ with tab_groups:
     st.divider()
     st.subheader("💬 WhatsApp Subgroups")
 
-    wa_status_groups = wa_status(profile)
+    wa_status_groups = st.session_state.wa_status_cache  # reuse cached value, no extra network call
     if not wa_status_groups or not wa_status_groups.get("ready"):
         st.info("Start the WhatsApp service and connect your WhatsApp account to manage groups.")
     else:
