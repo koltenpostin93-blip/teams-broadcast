@@ -415,7 +415,7 @@ with tab_broadcast:
     st.subheader("Compose & Send")
 
     message = st.text_area("Message", height=180, placeholder="Type your message here...",
-                           key="teams_msg")
+                           key=f"message_{st.session_state.message_key}")
 
     uploaded_files = st.file_uploader(
         "Attach images (optional)",
