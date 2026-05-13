@@ -493,7 +493,6 @@ with tab_broadcast:
             st.session_state.last_teams_send = time.time()
             st.session_state.uploader_key += 1
             st.session_state.message_key += 1
-            st.session_state.teams_msg = ""  # clear message box
             if failed == 0:
                 st.success(f"Sent to all {success} chats successfully.")
             else:
