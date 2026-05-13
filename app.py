@@ -219,6 +219,7 @@ def load_groups(profile):
 
 def save_groups(groups, profile):
     sb_set(f"groups_{profile}", groups)
+    st.session_state.groups_cache = groups
 
 
 # ── Display name for a chat ───────────────────────────────────────────────────
@@ -287,6 +288,7 @@ def load_wa_groups(profile):
 
 def save_wa_groups(groups, profile):
     sb_set(f"wa_groups_{profile}", groups)
+    st.session_state.wa_groups_cache = groups
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -407,7 +409,9 @@ if not st.session_state.chats:
     with st.spinner("Loading your Teams chats..."):
         st.session_state.chats = fetch_chats(token)
 
-groups = load_groups(profile)
+if "groups_cache" not in st.session_state:
+    st.session_state.groups_cache = load_groups(profile)
+groups = st.session_state.groups_cache
 hidden_ids = set(groups.get("hidden", []))
 chats = [c for c in st.session_state.chats if c["id"] not in hidden_ids]
 chat_lookup = {c["id"]: chat_label(c) for c in chats}
@@ -554,7 +558,9 @@ with tab_whatsapp:
             with st.spinner("Loading WhatsApp chats..."):
                 st.session_state.wa_chats = wa_get_chats(profile)
 
-        wa_groups = load_wa_groups(profile)
+        if "wa_groups_cache" not in st.session_state:
+            st.session_state.wa_groups_cache = load_wa_groups(profile)
+        wa_groups = st.session_state.wa_groups_cache
         wa_hidden = set(wa_groups.get("hidden", []))
         wa_chats = [c for c in st.session_state.wa_chats if c["id"] not in wa_hidden]
         wa_chat_lookup = {c["id"]: c["name"] for c in wa_chats}
@@ -724,7 +730,9 @@ with tab_groups:
     if not wa_status_groups or not wa_status_groups.get("ready"):
         st.info("Start the WhatsApp service and connect your WhatsApp account to manage groups.")
     else:
-        wa_groups_edit = load_wa_groups(profile)
+        if "wa_groups_cache" not in st.session_state:
+            st.session_state.wa_groups_cache = load_wa_groups(profile)
+        wa_groups_edit = st.session_state.wa_groups_cache
 
         if "wa_chats" not in st.session_state:
             with st.spinner("Loading WhatsApp chats..."):
